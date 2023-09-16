@@ -9,7 +9,7 @@ from matplotlib import pyplot as plt
 
 from lib.visualization import plotting
 from lib.visualization.video import play_trip
-
+from lib.comms.orb_comms import ORBcomms
 from tqdm import tqdm
 
 
@@ -21,11 +21,13 @@ class VisualOdometry():
             self.images = self.receive_video_stream(video_source)
         else:
             self.images = self._load_images(os.path.join(data_dir, 'image_l'))
-        self.orb = cv2.ORB_create(3000)
+        self.orb = cv2.ORB_create(nfeatures=200)
         FLANN_INDEX_LSH = 6
         index_params = dict(algorithm=FLANN_INDEX_LSH, table_number=6, key_size=12, multi_probe_level=1)
         search_params = dict(checks=50)
         self.flann = cv2.FlannBasedMatcher(indexParams=index_params, searchParams=search_params)
+        self.descriptors_m1 =None
+        self.keypoints_m1 = None
 
     @staticmethod
     def _load_calib(filepath):
@@ -133,9 +135,42 @@ class VisualOdometry():
         return self.orb.detectAndCompute(var1, var2)
 
     def knn_match(self, var1, var2, k):
+        print(f"knn match types should be ndarray, ndarray {type(var1)} {type(var2)}")
+
         return self.flann.knnMatch(var1, var2, k)
 
-    def get_matches(self, i):
+    def get_mathces_new(self, descriptors, keypoints):
+        if self.descriptors_m1 is None:
+            self.descriptors_m1 = descriptors.copy()
+            self.keypoints_m1  = keypoints.copy()
+            return None, None
+        else:   
+            print(f"{type(self.descriptors_m1)} {type(descriptors)}")
+
+        matches = self.knn_match(self.descriptors_m1, descriptors, k=2)
+        # matches = self.flann.knnMatch(descriptors1, descriptors2, k=2)
+        # store all the good matches as per Lowe's ratio test.
+        
+        
+        good = []
+        for match in matches:
+            if len(match) < 2:
+                continue
+            m, n = match
+            if m.distance < 0.5 * n.distance:
+                good.append(m)
+
+
+        q1 = np.float32([ self.keypoints_m1[m.queryIdx].pt for m in good ])
+        q2 = np.float32([ keypoints[m.trainIdx].pt for m in good ])
+
+        self.descriptors_m1 = descriptors.copy()
+        self.keypoints_m1  = keypoints.copy()
+
+        return q1, q2
+
+
+    def get_matches(self, i, oc: ORBcomms):
         """
         This function detect and compute keypoints and descriptors from the i-1'th and i'th image using the class orb object
 
@@ -157,6 +192,10 @@ class VisualOdometry():
         keypoints2, descriptors2 = self.make_keypoints(self.images[i], None)
 
 
+        print(f"Original descriptor shape: {descriptors1.shape}")
+        data = oc._serialize_output(keypoints1, descriptors1)
+        keypoints1, descriptors1 = oc.deserialize_input(data)
+        print(f"deserialized output descriptor shape: {descriptors1.shape}")
 
         matches = self.knn_match(descriptors1, descriptors2, k=2)
         # matches = self.flann.knnMatch(descriptors1, descriptors2, k=2)
@@ -164,8 +203,11 @@ class VisualOdometry():
         
         
         good = []
-        for m,n in matches:
-            if m.distance < 0.5*n.distance:
+        for match in matches:
+            if len(match) < 2:
+                continue
+            m, n = match
+            if m.distance < 0.5 * n.distance:
                 good.append(m)
 
         q1 = np.float32([ keypoints1[m.queryIdx].pt for m in good ])
@@ -337,11 +379,12 @@ def main(source=None):
     gt_path = []
     estimated_path = []
     cur_pose = None
+    oc = ORBcomms()
     for i in range(1,len(vo.images)):
         print(f"{i}/{len(vo.images)}")
         
     
-        q1, q2 = vo.get_matches(i)
+        q1, q2 = vo.get_matches(i, oc)
         transf = vo.get_pose(q1, q2)
         if cur_pose is None:
             cur_pose = transf
